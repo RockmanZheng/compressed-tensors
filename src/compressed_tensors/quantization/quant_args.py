@@ -26,6 +26,7 @@ __all__ = [
     "FP8_DTYPE",
     "FP8_E4M3_DATA",
     "FP4_E2M1_DATA",
+    "CUSTOM_FP8_E5M2_DATA",
     "FloatArgs",
     "QuantizationType",
     "QuantizationStrategy",
@@ -75,6 +76,54 @@ class FP8_E4M3_DATA(FloatArgs):
     max = torch.finfo(torch.float8_e4m3fn).max
     min = torch.finfo(torch.float8_e4m3fn).min
     dtype = torch.float8_e4m3fn
+
+
+class CUSTOM_FP8_E5M2_DATA(FloatArgs):
+    """
+    Custom FP8 E5M2 format data class.
+    
+    This class defines a custom FP8 format with 5 exponent bits and 2 mantissa bits.
+    The format provides a wider dynamic range compared to E4M3 but with lower precision.
+    
+    Format: 1 sign bit + 5 exponent bits + 2 mantissa bits = 8 bits total
+    
+    Note: This implementation uses a custom casting function that can be replaced
+    with a custom CUDA/C++ operator for better performance.
+    """
+    exponent = 5
+    mantissa = 2
+    bits = 8
+    # E5M2 format has a wider range than E4M3
+    # Max value: 2^15 * (1 + 3/4) = 57344
+    max = 57344.0
+    min = -57344.0
+    dtype = None  # No native PyTorch dtype, will use custom casting
+    
+    @staticmethod
+    @torch.compile
+    def cast_to_custom_fp8(x):
+        """
+        Cast tensor to custom FP8 E5M2 format.
+        
+        This is a placeholder implementation that simulates the custom FP8 format.
+        In production, this should be replaced with a custom CUDA/C++ operator
+        for better performance.
+        
+        To integrate a custom operator:
+        1. Register your custom op: torch.ops.load_library("path/to/custom_op.so")
+        2. Replace this function body with: return torch.ops.custom_ops.fp8_e5m2_cast(x)
+        
+        :param x: Input tensor to cast
+        :return: Tensor cast to custom FP8 E5M2 format (returned in original dtype)
+        """
+        # Placeholder: This simulates the quantization by clamping to the range
+        # In a real implementation, you would call your custom operator here
+        # Example: return torch.ops.custom_ops.fp8_e5m2_cast(x)
+        
+        # For now, we clamp to the valid range and return
+        # This maintains the tensor in its original dtype but with values
+        # that would be representable in the custom FP8 format
+        return torch.clamp(x, min=CUSTOM_FP8_E5M2_DATA.min, max=CUSTOM_FP8_E5M2_DATA.max)
 
 
 # TODO: Remove soon in favour of a more descriptive FloatArgs
@@ -172,6 +221,13 @@ class QuantizationArgs(BaseModel, use_enum_values=True):
     block_structure: Optional[List[int]] = None
     dynamic: Union[DynamicType, bool] = False
     actorder: Union[ActivationOrdering, bool, None] = None
+    custom_format: Optional[str] = Field(
+        default=None,
+        description=(
+            "Custom format identifier for float quantization (e.g., 'e5m2', 'e4m3'). "
+            "Used to distinguish between different FP8 formats when num_bits=8 and type='float'."
+        ),
+    )
     observer: Optional[str] = Field(
         default=None,
         description=(
@@ -343,7 +399,14 @@ class QuantizationArgs(BaseModel, use_enum_values=True):
     def pytorch_dtype(self) -> torch.dtype:
         if self.type == QuantizationType.FLOAT:
             if self.num_bits == 8:
-                return FP8_E4M3_DATA.dtype
+                # Check for custom format
+                if self.custom_format == "e5m2":
+                    # Custom FP8 E5M2 format - return float32 as placeholder
+                    # since we don't have a native dtype
+                    return CUSTOM_FP8_E5M2_DATA.dtype if CUSTOM_FP8_E5M2_DATA.dtype else torch.float32
+                else:
+                    # Default to E4M3 format
+                    return FP8_E4M3_DATA.dtype
             else:
                 raise NotImplementedError("Only num_bits in (8) are supported")
         elif self.type == QuantizationType.INT:
@@ -377,7 +440,13 @@ def round_to_quantized_type(
     original_dtype = tensor.dtype
     if args.type == QuantizationType.FLOAT:
         if args.num_bits == 8:
-            rounded = tensor.to(FP8_E4M3_DATA.dtype)
+            # Check for custom format
+            if hasattr(args, 'custom_format') and args.custom_format == 'e5m2':
+                # Use custom FP8 E5M2 casting
+                rounded = CUSTOM_FP8_E5M2_DATA.cast_to_custom_fp8(tensor)
+            else:
+                # Default to E4M3 format
+                rounded = tensor.to(FP8_E4M3_DATA.dtype)
         elif args.num_bits == 4:
             rounded = FP4_E2M1_DATA.cast_to_fp4(tensor)
         else:
