@@ -26,6 +26,7 @@ __all__ = [
     "FP8_DTYPE",
     "FP8_E4M3_DATA",
     "FP4_E2M1_DATA",
+    "HIFLOAT8_DATA",
     "FloatArgs",
     "QuantizationType",
     "QuantizationStrategy",
@@ -75,6 +76,27 @@ class FP8_E4M3_DATA(FloatArgs):
     max = torch.finfo(torch.float8_e4m3fn).max
     min = torch.finfo(torch.float8_e4m3fn).min
     dtype = torch.float8_e4m3fn
+
+
+class HIFLOAT8_DATA(FloatArgs):
+    """
+    Huawei HiFloat8 format data class.
+    
+    This class defines a proprietary FP8 format used by Huawei hardware.
+    """
+    bits = 8
+    max = 2**15
+    min = -2**15
+    dtype = None  # No native PyTorch dtype, will use custom casting
+    
+    @staticmethod
+    def cast_to_hifloat8(x):
+        """
+        Cast tensor to HiFloat8 format.
+        """
+        import torch_npu
+        return torch_npu.npu_dtype_cast(torch.clamp(x, min=HIFLOAT8_DATA.min, max=HIFLOAT8_DATA.max), dtype=torch_npu.hifloat8)
+        
 
 
 # TODO: Remove soon in favour of a more descriptive FloatArgs
@@ -172,6 +194,13 @@ class QuantizationArgs(BaseModel, use_enum_values=True):
     block_structure: Optional[List[int]] = None
     dynamic: Union[DynamicType, bool] = False
     actorder: Union[ActivationOrdering, bool, None] = None
+    custom_format: Optional[str] = Field(
+        default=None,
+        description=(
+            "Custom format identifier for hifloat8. "
+            "Used to distinguish between classic FP8 formats when num_bits=8 and type='float'."
+        ),
+    )
     observer: Optional[str] = Field(
         default=None,
         description=(
@@ -217,16 +246,18 @@ class QuantizationArgs(BaseModel, use_enum_values=True):
                 return [int(x) for x in value.split("x")]
             except Exception:
                 raise ValueError(
-                    f"Invalid block_structure '{value}'. Must be a list of two ints [rows, cols]."
+                    f"Invalid block_structure '{value}'. Must be a list of ints "
+                    "[rows, cols]."
                 )
         if isinstance(value, (list, tuple)):
             if len(value) != 2 or not all(isinstance(v, int) for v in value):
                 raise ValueError(
-                    f"Invalid block_structure '{value}'. Must be a list of two ints [rows, cols]."
+                    f"Invalid block_structure '{value}'. Must be a list of ints "
+                    "[rows, cols]."
                 )
             return list(value)
         raise ValueError(
-            f"Invalid block_structure '{value}'. Must be a list of two ints [rows, cols]."
+            f"Invalid block_structure '{value}'. Must be a list of ints [rows, cols]."
         )
 
     @field_validator("strategy", mode="before")
@@ -307,7 +338,7 @@ class QuantizationArgs(BaseModel, use_enum_values=True):
             )
             if strategy not in supported_strategies:
                 raise ValueError(
-                    f"One of {supported_strategies} must be used for dynamic quantization"
+                    f"One of {supported_strategies} must be used for dynamic quant."
                 )
 
             if (
@@ -322,7 +353,7 @@ class QuantizationArgs(BaseModel, use_enum_values=True):
                         observer != "memoryless"
                     ):  # avoid annoying users with old configs
                         warnings.warn(
-                            "No observer is used for dynamic quantization, setting to None"
+                            "No observer is used for dynamic quant., setting to None"
                         )
                     observer = None
             else:
@@ -341,7 +372,13 @@ class QuantizationArgs(BaseModel, use_enum_values=True):
     def pytorch_dtype(self) -> torch.dtype:
         if self.type == QuantizationType.FLOAT:
             if self.num_bits == 8:
-                return FP8_E4M3_DATA.dtype
+                # Check for custom format
+                if self.custom_format == "hifloat8":
+                    # Custom HiFloat8 format
+                    return HIFLOAT8_DATA.dtype
+                else:
+                    # Default to E4M3 format
+                    return FP8_E4M3_DATA.dtype
             else:
                 raise NotImplementedError("Only num_bits in (8) are supported")
         elif self.type == QuantizationType.INT:
@@ -375,7 +412,13 @@ def round_to_quantized_type(
     original_dtype = tensor.dtype
     if args.type == QuantizationType.FLOAT:
         if args.num_bits == 8:
-            rounded = tensor.to(FP8_E4M3_DATA.dtype)
+            # Check for custom format
+            if hasattr(args, 'custom_format') and args.custom_format == 'hifloat8':
+                # Use custom HiFloat8 casting
+                rounded = HIFLOAT8_DATA.cast_to_hifloat8(tensor)
+            else:
+                # Default to E4M3 format
+                rounded = tensor.to(FP8_E4M3_DATA.dtype)
         elif args.num_bits == 4:
             rounded = FP4_E2M1_DATA.cast_to_fp4(tensor)
         else:
